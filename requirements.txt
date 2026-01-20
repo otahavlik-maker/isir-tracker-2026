@@ -1,0 +1,7 @@
+streamlit
+zeep
+requests
+python-dotenv
+google-generativeai
+fpdf2
+pandas
