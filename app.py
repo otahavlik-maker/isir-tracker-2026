@@ -2,7 +2,6 @@ import streamlit as st
 import isir_service
 import ai_service
 import os
-import pandas as pd
 import base64
 import unicodedata
 from datetime import datetime, timedelta
@@ -11,70 +10,77 @@ from fpdf import FPDF
 # --- CONFIG ---
 st.set_page_config(page_title="AI ISIR Tracker Pro", layout="centered")
 
-# --- POMOCNÁ FUNKCE PRO PDF (Odstranění diakritiky pro stabilitu) ---
 def clean_text(text):
-    """Odstraní háčky a čárky, aby PDF nespadlo na Unicode chybě."""
+    """Robustní vyčištění textu pro PDF (odstraňuje diakritiku a nahrazuje Unicode znaky)."""
     if not text: return ""
-    return "".join(c for c in unicodedata.normalize('NFD', str(text)) if unicodedata.category(c) != 'Mn')
-
-# --- STYLY (Viditelné karty i v Light modu) ---
-st.markdown("""
-    <style>
-    .fixed-footer {
-        position: fixed; left: 0; bottom: 0; width: 100%;
-        background-color: #343a40; border-top: 1px solid #dee2e6;
-        color: white; text-align: center; font-size: 14px; padding: 12px; z-index: 1000;
+    # Mapa pro náhradu Unicode znaků, které Helvetica neumí
+    mapping = {
+        ord('–'): '-', ord('—'): '-', ord('“'): '"', ord('”'): '"',
+        ord('‘'): "'", ord('’'): "'", ord('•'): '*', ord('…'): '...',
+        ord('²'): '2', ord('³'): '3', ord(' '): ' ' # neodstranitelná mezera
     }
-    .main .block-container { padding-bottom: 100px; }
-    .auction-card {
-        border-radius: 10px; padding: 15px; 
-        background-color: #f0f2f6; /* Světle šedá pro viditelnost */
-        color: #1f1f1f;
-        border-left: 5px solid #ff4b4b; margin-bottom: 15px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
-    }
-    </style>
-    <div class="fixed-footer">
-        © 2026 <b>AI ISIR Tracker</b> | Kontakt: otahavlik@gmail.com
-    </div>
-""", unsafe_allow_html=True)
+    text = str(text).translate(mapping)
+    # Odstranění zbylé diakritiky
+    return "".join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
 
-# --- SESSION STATE ---
+def get_pdf_base64(file_path):
+    with open(file_path, "rb") as f:
+        return base64.b64encode(f.read()).decode('utf-8')
+
+# Session State Init
+if 'lang' not in st.session_state: st.session_state.lang = "cs"
 if 'watchlist' not in st.session_state: st.session_state.watchlist = {}
 if 'scan_results' not in st.session_state: st.session_state.scan_results = None
 if 'selected_auction' not in st.session_state: st.session_state.selected_auction = None
+if 'ins_manual_res' not in st.session_state: st.session_state.ins_manual_res = None
 
-# --- SIDEBAR (Stabilní nastavení) ---
+# --- DESIGN ---
+st.markdown("""
+    <style>
+    .fixed-footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #212529; color: white; text-align: center; padding: 12px; z-index: 1000; font-size: 14px; }
+    .main .block-container { padding-bottom: 120px; }
+    .auction-card {
+        border-radius: 8px; padding: 15px; background-color: #f8f9fa;
+        border-left: 10px solid #dc3545; margin-bottom: 15px; color: #212529;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- SIDEBAR (WATCHLIST) ---
 with st.sidebar:
-    st.header("Nastavení / Settings")
-    lang_choice = st.selectbox("Jazyk / Language", ["Čeština", "English"])
-    lang = "cs" if lang_choice == "Čeština" else "en"
+    st.header("Nastavení")
+    l_choice = st.selectbox("Language / Jazyk", ["Čeština", "English"], index=0 if st.session_state.lang == "cs" else 1)
+    st.session_state.lang = "cs" if l_choice == "Čeština" else "en"
+    lang = st.session_state.lang
     
     st.divider()
     st.header("📌 Watchlist")
     if st.session_state.watchlist:
-        # PDF Report Button
-        if st.button("📥 Export Report (PDF)", use_container_width=True):
+        if st.button("📥 Export PDF Report", use_container_width=True, key="side_exp"):
             try:
                 pdf = FPDF()
+                pdf.set_auto_page_break(auto=True, margin=15)
                 pdf.add_page()
-                pdf.set_font("Arial", 'B', 14)
-                pdf.cell(0, 10, "ISIR Tracker - Report", ln=True, align='C')
+                pdf.set_font("Helvetica", 'B', 16)
+                pdf.cell(0, 10, "ISIR Tracker - Report Sledovanych Polozek", ln=True, align='C')
+                pdf.ln(5)
                 for d_id, item in st.session_state.watchlist.items():
-                    pdf.set_font("Arial", 'B', 11)
-                    pdf.cell(0, 10, f"Spis: {clean_text(item['name'])}", ln=True)
-                    pdf.set_font("Arial", '', 9)
-                    pdf.multi_cell(0, 5, f"Udalost: {clean_text(item['event'])}")
+                    pdf.set_font("Helvetica", 'B', 12)
+                    pdf.set_fill_color(240, 240, 240)
+                    pdf.cell(0, 10, f" Spis: {clean_text(item['name'])}", ln=True, fill=True)
+                    pdf.set_font("Helvetica", '', 10)
+                    pdf.multi_cell(0, 7, f"Akce: {clean_text(item.get('event', 'N/A'))}")
+                    pdf.cell(0, 7, f"Zverejneno: {item['date'].strftime('%d.%m.%Y %H:%M') if 'date' in item else 'N/A'}", ln=True)
                     if 'ai_summary' in item:
-                        pdf.multi_cell(0, 5, f"AI: {clean_text(item['ai_summary'])}")
+                        pdf.set_font("Helvetica", 'I', 9)
+                        pdf.multi_cell(0, 6, f"AI Analyza:\n{clean_text(item['ai_summary'])}")
                     pdf.ln(5); pdf.cell(0, 0, "", "T"); pdf.ln(5)
                 
-                pdf_output = pdf.output(dest='S').encode('latin-1', errors='replace')
-                st.download_button("Klikněte pro stažení PDF", data=pdf_output, file_name="isir_report.pdf", mime="application/pdf")
-            except Exception as e:
-                st.error(f"Chyba PDF: {e}")
+                pdf_data = pdf.output()
+                st.download_button("Uložit report (PDF)", data=bytes(pdf_data), file_name="isir_report.pdf", mime="application/pdf", use_container_width=True)
+            except Exception as e: st.error(f"Chyba PDF: {str(e)}")
 
-        st.divider()
         for doc_id, item in list(st.session_state.watchlist.items()):
             c1, c2 = st.columns([4, 1])
             with c1:
@@ -83,100 +89,120 @@ with st.sidebar:
             with c2:
                 if st.button("❌", key=f"del_{doc_id}"):
                     del st.session_state.watchlist[doc_id]; st.rerun()
-    else:
-        st.caption("Seznam je prázdný.")
+    else: st.caption("Watchlist je prázdný.")
 
-# --- TRANSLATIONS ---
+# Překlady
 t = {
-    "title": "⚖️ AI ISIR Tracker Pro",
-    "scan_btn": "🚀 SPUSTIT SKEN",
-    "ic_head": "🔍 Lustrace IČO",
-    "preview": "👁️ NÁHLED",
-    "ai_btn": "🤖 AI ANALÝZA",
-    "watch_btn": "⭐ ULOŽIT",
+    "title": "⚖️ AI ISIR Tracker Pro", "scan_btn": "🚀 SPUSTIT SKEN VYHLÁŠEK", "ins_head": "🔍 Detail INS (Vizitka subjektu)",
+    "preview": "👁️ NÁHLED", "ai_btn": "🤖 AI ANALÝZA", "watch_btn": "⭐ ULOŽIT", "footer": "© 2026 AI ISIR Tracker"
 } if lang == "cs" else {
-    "title": "⚖️ AI ISIR Tracker Pro",
-    "scan_btn": "🚀 RUN SCAN",
-    "ic_head": "🔍 IČO Lookup",
-    "preview": "👁️ PREVIEW",
-    "ai_btn": "🤖 AI ANALYSIS",
-    "watch_btn": "⭐ SAVE",
+    "title": "⚖️ AI ISIR Tracker Pro", "scan_btn": "🚀 RUN SEARCH", "ins_head": "🔍 INS Detail (Search Subject)",
+    "preview": "👁️ PREVIEW", "ai_btn": "🤖 AI ANALYSIS", "watch_btn": "⭐ SAVE", "footer": "© 2026 AI ISIR Tracker"
 }
 
-# --- MAIN RENDERER ---
-def render_item(item, key_p):
+# --- ITEM RENDERER ---
+def render_item(item, prefix):
     with st.container():
         st.markdown(f"""<div class="auction-card">
-            <b>{item['name']}</b> | {item['date'].strftime('%d.%m. %H:%M')}<br>
-            <small>{item['event'][:130]}...</small>
+            <h3 style='margin:0;'>⚖️ {item['name']}</h3>
+            <p style='margin:0;'><b>Akce:</b> {item.get('event', 'N/A')}</p>
+            <p style='margin:0; font-size:12px; color:#666;'><b>Zveřejněno:</b> {item['date'].strftime('%d.%m.%Y %H:%M') if 'date' in item else 'N/A'}</p>
         </div>""", unsafe_allow_html=True)
         
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2])
         with c1:
-            if st.button(t["preview"], key=f"p_{key_p}_{item['doc_id']}", use_container_width=True):
-                st.session_state[f"v_{item['doc_id']}"] = not st.session_state.get(f"v_{item['doc_id']}", False)
+            if item.get('pdf_url'):
+                if st.button(t["preview"], key=f"p_{prefix}_{item['doc_id']}", use_container_width=True):
+                    st.session_state[f"v_{item['doc_id']}"] = not st.session_state.get(f"v_{item['doc_id']}", False)
+            else: st.button("Bez PDF", disabled=True, use_container_width=True, key=f"np_{prefix}_{item['doc_id']}")
         with c2:
-            if st.button(t["ai_btn"], key=f"a_{key_p}_{item['doc_id']}", use_container_width=True):
-                st.session_state[f"run_{item['doc_id']}"] = True
+            if item.get('pdf_url'):
+                if st.button(t["ai_btn"], key=f"a_{prefix}_{item['doc_id']}", use_container_width=True):
+                    st.session_state[f"ai_{item['doc_id']}"] = True
+            else: st.button("Bez AI", disabled=True, use_container_width=True, key=f"na_{prefix}_{item['doc_id']}")
         with c3:
-            if st.button(t["watch_btn"], key=f"w_{key_p}_{item['doc_id']}", use_container_width=True):
-                st.session_state.watchlist[item['doc_id']] = item; st.toast("Uloženo!")
+            if st.button(t["watch_btn"], key=f"w_{prefix}_{item['doc_id']}", use_container_width=True):
+                st.session_state.watchlist[item['doc_id']] = item
+                st.toast("Uloženo!"); st.rerun()
         with c4:
-            if item.get('pdf_url'): st.link_button("📄 PDF", item['pdf_url'], use_container_width=True)
+            if item.get('pdf_url'): 
+                st.link_button("↗️ Otevřít", item['pdf_url'], use_container_width=True)
 
         if st.session_state.get(f"v_{item['doc_id']}", False):
-            tmp = f"pre_{item['doc_id']}.pdf"
-            if isir_service.download_pdf(item['pdf_url'], tmp):
-                with open(tmp, "rb") as f: b64 = base64.b64encode(f.read()).decode('utf-8')
-                st.markdown(f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="700"></iframe>', unsafe_allow_html=True)
-                os.remove(tmp)
+            tmp_path = f"t_view_{item['doc_id']}.pdf"
+            if isir_service.download_pdf(item['pdf_url'], tmp_path):
+                b64 = get_pdf_base64(tmp_path)
+                st.markdown(f'<embed src="data:application/pdf;base64,{b64}" width="100%" height="750" type="application/pdf">', unsafe_allow_html=True)
 
-        if st.session_state.get(f"run_{item['doc_id']}", False):
-            if 'ai_summary' in item: st.info(item['ai_summary'])
+        if st.session_state.get(f"ai_{item['doc_id']}", False):
+            if 'ai_summary' in item: 
+                st.info(item['ai_summary'])
+                # EXPORT AI ANALÝZY
+                ac1, ac2 = st.columns(2)
+                with ac1:
+                    st.download_button("📥 Stáhnout TXT", data=clean_text(item['ai_summary']), file_name=f"ai_{item['name']}.txt", use_container_width=True, key=f"dl_txt_{item['doc_id']}")
+                with ac2:
+                    try:
+                        apdf = FPDF(); apdf.add_page(); apdf.set_font("Helvetica", 'B', 14)
+                        apdf.cell(0, 10, f"AI Analyza - {clean_text(item['name'])}", ln=True)
+                        apdf.set_font("Helvetica", '', 10); apdf.multi_cell(0, 7, clean_text(item['ai_summary']))
+                        st.download_button("📥 Stáhnout PDF", data=bytes(apdf.output()), file_name=f"ai_{item['name']}.pdf", use_container_width=True, key=f"dl_pdf_{item['doc_id']}")
+                    except Exception as e: st.error(f"Chyba PDF exportu AI: {e}")
             else:
-                with st.spinner("AI..."):
-                    tmp = f"ai_{item['doc_id']}.pdf"
-                    if isir_service.download_pdf(item['pdf_url'], tmp):
-                        res = ai_service.analyze_document(tmp, lang)
-                        item['ai_summary'] = res; st.info(res); os.remove(tmp)
+                with st.spinner("AI provádí rešerši..."):
+                    tmp_ai = f"t_ai_{item['doc_id']}.pdf"
+                    if isir_service.download_pdf(item['pdf_url'], tmp_ai):
+                        res = ai_service.analyze_document(tmp_ai, lang)
+                        item['ai_summary'] = res; st.rerun()
 
-# --- APP FLOW ---
+# --- MAIN ---
 st.title(t["title"])
 if st.session_state.selected_auction:
     with st.container(border=True):
         st.subheader("⭐ Detail sledované položky")
         render_item(st.session_state.selected_auction, "det")
-        if st.button("Zavřít detail ✖️"): st.session_state.selected_auction = None; st.rerun()
+        if st.button("Zavřít detail ✖️", key="close_det"): st.session_state.selected_auction = None; st.rerun()
 
 st.divider()
-
-# Skenování
 col1, col2 = st.columns([2, 1])
 with col1:
-    period = st.selectbox("Rozsah:", ["Dnes", "Tento týden", "Tento měsíc", "Vlastní"], label_visibility="collapsed")
+    period = st.selectbox("Období:", ["Dnes", "Posledních 7 dní", "Posledních 30 dní", "Vlastní rozsah"], label_visibility="collapsed", key="per_sel")
     s_date = datetime.now().replace(hour=0, minute=0, second=0)
-    if period == "Tento týden": s_date -= timedelta(days=7)
-    elif period == "Tento měsíc": s_date -= timedelta(days=30)
-    elif period == "Vlastní":
-        dr = st.date_input("Kalendář", [datetime.now() - timedelta(days=7), datetime.now()])
-        if len(dr) == 2: s_date = datetime.combine(dr[0], datetime.min.time())
+    e_date = datetime.now()
+    if period == "Posledních 7 dní": s_date -= timedelta(days=7)
+    elif period == "Posledních 30 dní": s_date -= timedelta(days=30)
+    elif period == "Vlastní rozsah":
+        dr = st.date_input("Od - Do", [datetime.now() - timedelta(days=2), datetime.now()], key="custom_cal")
+        if len(dr) == 2:
+            s_date = datetime.combine(dr[0], datetime.min.time())
+            e_date = datetime.combine(dr[1], datetime.max.time())
+
 with col2:
-    if st.button(t["scan_btn"], use_container_width=True, type="primary"):
-        with st.spinner("Hledám..."):
-            data, _, err = isir_service.fetch_auctions_by_date(s_date)
-            if err: st.error(err)
-            else: st.session_state.scan_results = data
+    if st.button(t["scan_btn"], use_container_width=True, type="primary", key="scan"):
+        pb = st.progress(0, text="Navazuji spojení...")
+        data, _, err = isir_service.fetch_auctions_by_date(s_date, e_date, lambda p, t: pb.progress(p, text=t))
+        if err: st.error(err)
+        else: st.session_state.scan_results = data
+        pb.empty()
 
 if st.session_state.scan_results:
-    st.markdown(f"### 📋 Výsledky: {len(st.session_state.scan_results)}")
+    st.markdown(f"### 📋 Nalezeno: {len(st.session_state.scan_results)}")
     for item in st.session_state.scan_results: render_item(item, "list")
 
 st.divider()
-st.subheader(t["ic_head"])
+st.subheader(t["ins_head"])
 i1, i2 = st.columns([3, 1])
-with i1: ic_v = st.text_input("IČO", placeholder="24282925", label_visibility="collapsed")
+with i1: ins_v = st.text_input("Zadejte značku (např. INS 12925/2022)", label_visibility="collapsed", key="ins_manual_in")
 with i2:
-    if st.button("Lustrovat", use_container_width=True):
-        res, err = isir_service.search_by_ic(ic_v)
+    if st.button("Hledat", use_container_width=True, key="ins_manual_btn"):
+        res, err = isir_service.get_subject_info(ins_v)
         if err: st.error(err)
-        elif res: st.success(f"Nalezen: {res[0].nazevOsoby}")
+        else: st.session_state.ins_manual_res = res
+
+if st.session_state.ins_manual_res:
+    res = st.session_state.ins_manual_res
+    with st.container(border=True):
+        st.markdown(f"### 👤 {res['jmeno']}\n**Spis:** {res['name']} | **Stav:** :red[{res['stav']}]\n**IČ / RC:** {res['ic']} / {res['rc']} | **Bydliště:** {res['adresa']}")
+        if st.button("Zavřít vizitku ✖️", key="close_viz"): st.session_state.ins_manual_res = None; st.rerun()
+
+st.markdown(f'<div class="fixed-footer">{t["footer"]} | otahavlik@gmail.com</div>', unsafe_allow_html=True)
